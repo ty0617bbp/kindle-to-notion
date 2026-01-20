@@ -1,9 +1,6 @@
 name: Sync Kindle Highlights
 
 on:
-  push:
-    paths:
-      - 'My Clippings.txt'
   workflow_dispatch:
 
 jobs:
