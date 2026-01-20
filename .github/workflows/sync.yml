@@ -1,0 +1,178 @@
+name: Sync Kindle Highlights
+
+on:
+  push:
+    paths:
+      - 'My Clippings.txt'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+      
+      - name: Parse Kindle Highlights
+        id: parse
+        run: |
+          python3 << 'EOF'
+          import re
+          import json
+          from datetime import datetime
+          
+          # Read My Clippings.txt
+          try:
+              with open('My Clippings.txt', 'r', encoding='utf-8') as f:
+                  content = f.read()
+          except FileNotFoundError:
+              print("My Clippings.txt not found")
+              exit(1)
+          
+          # Parse highlights
+          entries = content.split('==========\n')
+          highlights_by_book = {}
+          
+          for entry in entries:
+              if not entry.strip():
+                  continue
+              
+              lines = entry.strip().split('\n')
+              if len(lines) < 2:
+                  continue
+              
+              # Extract book title and author
+              book_info = lines[0]
+              
+              # Extract highlight text (last non-empty line before metadata)
+              highlight_text = None
+              for line in reversed(lines[1:]):
+                  if line.strip() and not line.startswith('-'):
+                      highlight_text = line.strip()
+                      break
+              
+              if not highlight_text:
+                  continue
+              
+              # Initialize book entry if not exists
+              if book_info not in highlights_by_book:
+                  highlights_by_book[book_info] = []
+              
+              # Add highlight
+              highlights_by_book[book_info].append({
+                  'text': highlight_text,
+                  'timestamp': datetime.now().isoformat()
+              })
+          
+          # Save to JSON
+          with open('parsed_highlights.json', 'w', encoding='utf-8') as f:
+              json.dump(highlights_by_book, f, ensure_ascii=False, indent=2)
+          
+          print(f"Parsed {len(highlights_by_book)} books")
+          EOF
+      
+      - name: Upload to Notion
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          python3 << 'EOF'
+          import json
+          import os
+          import requests
+          from datetime import datetime
+          
+          # Get credentials
+          api_key = os.environ.get('NOTION_API_KEY')
+          database_id = os.environ.get('NOTION_DATABASE_ID')
+          
+          if not api_key or not database_id:
+              print("Error: NOTION_API_KEY or NOTION_DATABASE_ID not set")
+              exit(1)
+          
+          # Read parsed highlights
+          try:
+              with open('parsed_highlights.json', 'r', encoding='utf-8') as f:
+                  highlights_by_book = json.load(f)
+          except FileNotFoundError:
+              print("parsed_highlights.json not found")
+              exit(1)
+          
+          # Notion API headers
+          headers = {
+              "Authorization": f"Bearer {api_key}",
+              "Content-Type": "application/json",
+              "Notion-Version": "2022-06-28"
+          }
+          
+          # Upload to Notion
+          notion_url = "https://api.notion.com/v1/pages"
+          uploaded_count = 0
+          
+          for book_info, highlights in highlights_by_book.items():
+              # Parse book info
+              parts = book_info.split(' (')
+              book_title = parts[0].strip()
+              author = parts[1].rstrip(')') if len(parts) > 1 else "Unknown"
+              
+              for highlight in highlights:
+                  # Create Notion page
+                  payload = {
+                      "parent": {
+                          "database_id": database_id
+                      },
+                      "properties": {
+                          "Book Title": {
+                              "title": [
+                                  {
+                                      "text": {
+                                          "content": book_title
+                                      }
+                                  }
+                              ]
+                          },
+                          "Author": {
+                              "rich_text": [
+                                  {
+                                      "text": {
+                                          "content": author
+                                      }
+                                  }
+                              ]
+                          },
+                          "Highlights": {
+                              "rich_text": [
+                                  {
+                                      "text": {
+                                          "content": highlight['text']
+                                      }
+                                  }
+                              ]
+                          }
+                      }
+                  }
+                  
+                  try:
+                      response = requests.post(notion_url, json=payload, headers=headers)
+                      if response.status_code == 200:
+                          uploaded_count += 1
+                          print(f"✓ Uploaded: {book_title}")
+                      else:
+                          print(f"✗ Error uploading {book_title}: {response.status_code}")
+                          print(response.text)
+                  except Exception as e:
+                      print(f"✗ Exception: {e}")
+          
+          print(f"\nTotal uploaded: {uploaded_count}")
+          EOF
